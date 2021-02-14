@@ -7,6 +7,7 @@ import iam = require('@aws-cdk/aws-iam');
 import event_sources = require('@aws-cdk/aws-lambda-event-sources');
 
 const imageBucketName = "cdk-rekn-imagebucket"
+const resizedBucketName = imageBucketName + "-resized"
 
 
 export class AwsimageprojStack extends cdk.Stack {
@@ -17,8 +18,15 @@ export class AwsimageprojStack extends cdk.Stack {
         // Image Bucket
         // ====================================================================
 
-        const imagBucket = new s3.Bucket(this, imageBucketName)
+        const imagBucket = new s3.Bucket(this, imageBucketName, {removalPolicy: cdk.RemovalPolicy.DESTROY});
         new cdk.CfnOutput(this, 'imagBucket', {value: imagBucket.bucketName})
+
+        // ======================================================================
+        // Thumbnail Bucket
+        // ======================================================================
+
+        const resizedBucket = new s3.Bucket(this, resizedBucketName, {removalPolicy: cdk.RemovalPolicy.DESTROY});
+        new cdk.CfnOutput(this, 'imagBucket', {value: resizedBucket.bucketName})
 
 
         // ====================================================================
@@ -37,23 +45,61 @@ export class AwsimageprojStack extends cdk.Stack {
         // =========================================================================
         // Building our AWS Lambda function; compute for our serverless microservice
         // =========================================================================
+        const layer = new lambda.LayerVersion(this, 'pil', {
+            code: lambda.Code.fromAsset('reklayer'),
+            compatibleRuntimes: [lambda.Runtime.PYTHON_3_7],
+            license: 'Apache-2.0',
+            description: 'A layer to enable the PIL library in our Rekognintion Lambda',
+        });
+
+
+        // =========================================================================
+        // Building our AWS Lambda function; compute for our serverless microservice
+        // =========================================================================
         const rekFn = new lambda.Function(this, 'rekognitionFunction', {
             code: lambda.Code.fromAsset('rekognitionlambda'),
             runtime: lambda.Runtime.PYTHON_3_7,
             handler: 'index.handler',
             timeout: Duration.seconds(30),
             memorySize: 1024,
-            environment: {"TABLE": table.tableName, "BUCKET": imagBucket.bucketName},
+            layers: [layer],
+            environment: {
+                "TABLE": table.tableName,
+                "BUCKET": imagBucket.bucketName,
+                "THUMBBUCKET": resizedBucket.bucketName
+            },
         });
         rekFn.addEventSource(new event_sources.S3EventSource(imagBucket, {events: [s3.EventType.OBJECT_CREATED]}));
         imagBucket.grantRead(rekFn);
         table.grantWriteData(rekFn);
+        resizedBucket.grantPut(rekFn);
 
         rekFn.addToRolePolicy(new iam.PolicyStatement({
             effect: iam.Effect.ALLOW,
             actions: ['rekognition:DetectLabels'],
             resources: ['*']
         }));
+
+        // ================================
+        // Lambda for Synchronous Front End
+        // ================================
+
+        const serviceFn = new lambda.Function(this, 'serviceFunction', {
+            code: lambda.Code.fromAsset('servicelambda'),
+            runtime: lambda.Runtime.PYTHON_3_7,
+            handler: 'index.handler',
+            environment: {
+                "TABLE": table.tableName,
+                "BUCKET": imagBucket.bucketName,
+                "RESIZEDBUCKET": resizedBucket.bucketName
+
+            },
+
+
+        });
+        imagBucket.grantWrite(serviceFn);
+        resizedBucket.grantWrite(serviceFn);
+        table.grantReadWriteData(serviceFn);
 
 
         // The code that defines your stack goes here (which is above mentioned code in this script)
